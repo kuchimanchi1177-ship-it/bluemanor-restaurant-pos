@@ -6,6 +6,7 @@ import {
   Menu,
   PlusCircle,
   Clock,
+  UtensilsCrossed,
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -13,7 +14,7 @@ interface HeaderProps {
 }
 
 export default function Header({ onToggleMobileMenu }: HeaderProps) {
-  const { brand, updateBrand, activeTab, setActiveTab } = useApp();
+  const { brand, updateBrand, activeTab, setActiveTab, loginAsWaiter } = useApp();
   const [currentTime, setCurrentTime] = useState<string>('');
 
   useEffect(() => {
@@ -126,6 +127,17 @@ export default function Header({ onToggleMobileMenu }: HeaderProps) {
             }`}
           />
           <span>{brand.storeOpen ? 'Store Open' : 'Store Closed'}</span>
+        </button>
+
+        {/* Quick Switch to Waiter Mode for testing */}
+        <button
+          type="button"
+          onClick={() => loginAsWaiter('waiter-1', '1234')}
+          className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 text-xs font-bold transition cursor-pointer"
+          title="Preview Waiter Mobile Interface"
+        >
+          <UtensilsCrossed className="w-3.5 h-3.5 text-red-600" />
+          <span>Waiter View</span>
         </button>
 
         {/* Quick New Order Button (if not on POS) */}

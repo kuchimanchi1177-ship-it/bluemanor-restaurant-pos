@@ -7,6 +7,7 @@ import Header from '@/components/Header';
 import Toast from '@/components/Toast';
 import InvoiceModal from '@/components/InvoiceModal';
 import LoginScreen from '@/components/LoginScreen';
+import WaiterInterface from '@/components/waiter/WaiterInterface';
 
 import LiveOrdersView from '@/views/LiveOrdersView';
 import POSView from '@/views/POSView';
@@ -17,12 +18,17 @@ import FeedbacksView from '@/views/FeedbacksView';
 import SettingsView from '@/views/SettingsView';
 
 function MainAppShell() {
-  const { activeTab, isLoggedIn } = useApp();
+  const { activeTab, isLoggedIn, currentUser } = useApp();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   // If user is not logged in, show BLUEMANOR login gate
   if (!isLoggedIn) {
     return <LoginScreen />;
+  }
+
+  // If authenticated user is a Waiter, route to dedicated mobile-first Waiter Interface
+  if (currentUser?.role === 'Waiter') {
+    return <WaiterInterface />;
   }
 
   const renderActiveView = () => {

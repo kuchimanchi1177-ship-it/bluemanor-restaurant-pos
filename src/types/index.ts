@@ -8,6 +8,29 @@ export interface DemoUser {
   email: string;
   role: UserRole;
   avatar?: string;
+  waiterId?: string;
+  phone?: string;
+}
+
+export interface CreateOrderPayload {
+  tableNumber: string;
+  orderType: OrderType;
+  customerName?: string;
+  customerPhone?: string;
+  items: {
+    menuItemId: string;
+    name: string;
+    price: number;
+    quantity: number;
+    foodType: FoodType;
+    notes?: string;
+  }[];
+  notes?: string;
+  waiterName?: string;
+  paymentMethod?: PaymentMethod;
+  paymentStatus?: 'Paid' | 'Unpaid';
+  status?: OrderStatus;
+  discountPercentage?: number;
 }
 
 export interface RestaurantBrand {

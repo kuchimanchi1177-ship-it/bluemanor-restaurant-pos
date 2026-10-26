@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import confetti from 'canvas-confetti';
 import {
   RestaurantBrand,
@@ -18,6 +18,7 @@ import {
   TableStatus,
   DemoUser,
   UserRole,
+  CreateOrderPayload,
 } from '@/types';
 import {
   DEFAULT_BRAND,
@@ -29,7 +30,7 @@ import {
   INITIAL_TABLES,
   DEMO_USERS,
 } from '@/data/mockData';
-import { generateOrderNumber } from '@/utils/formatters';
+import { generateOrderNumber, formatINR } from '@/utils/formatters';
 
 interface CartMeta {
   tableNumber: string;
@@ -48,6 +49,7 @@ interface AppContextType {
   currentUser: DemoUser | null;
   isLoggedIn: boolean;
   login: (email: string, role?: UserRole) => void;
+  loginAsWaiter: (waiterId: string, pin: string) => boolean;
   logout: () => void;
 
   // Brand state
@@ -84,6 +86,7 @@ interface AppContextType {
   orders: Order[];
   updateOrderStatus: (orderId: string, status: OrderStatus) => void;
   cancelOrder: (orderId: string, reason?: string) => void;
+  createOrder: (payload: CreateOrderPayload) => Order | null;
 
   // POS & Cart
   cart: CartItem[];
@@ -377,6 +380,47 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
+  const loginAsWaiter = (waiterId: string, pin: string): boolean => {
+    const waiter = waiters.find((w) => w.id === waiterId);
+    if (!waiter) {
+      showToast({
+        type: 'error',
+        title: 'Staff Not Found',
+        message: 'Could not find a registered waiter with this ID.',
+      });
+      return false;
+    }
+
+    if (waiter.pin && waiter.pin !== pin.trim()) {
+      showToast({
+        type: 'error',
+        title: 'Incorrect PIN',
+        message: 'The PIN entered is invalid. Please try again.',
+      });
+      return false;
+    }
+
+    const waiterUser: DemoUser = {
+      id: `user-${waiter.id}`,
+      name: waiter.name,
+      email: `${waiter.name.toLowerCase().replace(/\s+/g, '.')}@bluemanor.com`,
+      role: 'Waiter',
+      avatar: waiter.avatar || '🧑‍🍳',
+      waiterId: waiter.id,
+      phone: waiter.phone,
+    };
+
+    setCurrentUser(waiterUser);
+    setIsLoggedIn(true);
+    setActiveTab('orders');
+    showToast({
+      type: 'success',
+      title: 'Waiter Shift Started',
+      message: `Signed in as ${waiter.name}. Welcome to floor service!`,
+    });
+    return true;
+  };
+
   // Brand Actions
   const updateBrand = (newDetails: Partial<RestaurantBrand>) => {
     setBrand((prev) => ({ ...prev, ...newDetails }));
@@ -494,6 +538,157 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setCart([]);
   };
 
+  // Idempotency tracking ref to prevent duplicate order submissions
+  const lastSubmissionRef = useRef<{ hash: string; timestamp: number }>({ hash: '', timestamp: 0 });
+
+  // Unified Order Creation Pipeline (Shared by POS and Waiter Interface)
+  const createOrder = (payload: CreateOrderPayload): Order | null => {
+    if (!payload.items || payload.items.length === 0) {
+      showToast({
+        type: 'error',
+        title: 'Order is Empty',
+        message: 'Please add at least one item to place an order.',
+      });
+      return null;
+    }
+
+    if (payload.orderType === 'Dine-in' && !payload.tableNumber) {
+      showToast({
+        type: 'error',
+        title: 'Table Number Required',
+        message: 'Please specify a table number for Dine-in orders.',
+      });
+      return null;
+    }
+
+    // Idempotency guard: prevent duplicate orders submitted within 2.5 seconds
+    const submissionHash = `${payload.tableNumber || 'Takeaway'}_${payload.items
+      .map((it) => `${it.menuItemId}x${it.quantity}`)
+      .sort()
+      .join(',')}`;
+    const now = Date.now();
+    if (
+      lastSubmissionRef.current.hash === submissionHash &&
+      now - lastSubmissionRef.current.timestamp < 2500
+    ) {
+      console.warn('Duplicate order attempt blocked by idempotency guard');
+      return null;
+    }
+    lastSubmissionRef.current = { hash: submissionHash, timestamp: now };
+
+    // Validate items and ensure canonical prices from menu
+    const validatedItems = payload.items.map((c) => {
+      const canonical = menuItems.find((m) => m.id === c.menuItemId);
+      const price = canonical ? canonical.price : c.price;
+      const foodType = canonical?.foodType || c.foodType || 'VEG';
+      return {
+        menuItemId: c.menuItemId,
+        name: canonical ? canonical.name : c.name,
+        price,
+        quantity: Math.max(1, c.quantity),
+        foodType,
+        notes: c.notes,
+      };
+    });
+
+    const subtotal = validatedItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    const discountPercent = Math.max(0, Math.min(100, payload.discountPercentage || 0));
+    const discount = Math.round((subtotal * discountPercent) / 100);
+    const discountedSubtotal = Math.max(0, subtotal - discount);
+
+    const gstRate = Math.max(0, brand.gstRate || 5);
+    const totalTax = (discountedSubtotal * gstRate) / 100;
+    const cgst = Math.round((totalTax / 2) * 100) / 100;
+    const sgst = Math.round((totalTax / 2) * 100) / 100;
+    const grandTotal = Math.round(discountedSubtotal + cgst + sgst);
+
+    const waiterAssigned = payload.waiterName || currentUser?.name || 'Staff';
+
+    const newOrder: Order = {
+      id: `ord-${Date.now()}`,
+      orderNumber: generateOrderNumber(orders.length),
+      customerName: (payload.customerName || 'Guest Customer').trim() || 'Guest Customer',
+      customerPhone: (payload.customerPhone || '+91 99999 00000').trim(),
+      tableNumber: payload.orderType === 'Dine-in' ? payload.tableNumber : 'Takeaway',
+      orderType: payload.orderType,
+      items: validatedItems,
+      subtotal,
+      discount,
+      discountPercentage: discountPercent > 0 ? discountPercent : undefined,
+      gstRate,
+      cgst,
+      sgst,
+      grandTotal,
+      status: payload.status || 'Kitchen',
+      createdAt: new Date().toISOString(),
+      paymentMethod: payload.paymentMethod || 'UPI / QR',
+      paymentStatus: payload.paymentStatus || 'Unpaid',
+      waiterName: waiterAssigned,
+      notes: payload.notes,
+    };
+
+    // Update table status if Dine-in
+    if (payload.orderType === 'Dine-in' && payload.tableNumber) {
+      setTables((prev) =>
+        prev.map((t) =>
+          t.tableNumber === payload.tableNumber
+            ? {
+                ...t,
+                status: 'Occupied',
+                currentOrderId: newOrder.orderNumber,
+                currentBillAmount: grandTotal,
+                occupiedSince: 'Just now',
+              }
+            : t
+        )
+      );
+    }
+
+    // Update waiter stats
+    if (waiterAssigned) {
+      setWaiters((prev) =>
+        prev.map((w) =>
+          w.name === waiterAssigned
+            ? { ...w, totalOrders: w.totalOrders + 1, totalSales: w.totalSales + grandTotal }
+            : w
+        )
+      );
+    }
+
+    // Update item sales counts
+    setMenuItems((prev) =>
+      prev.map((item) => {
+        const found = validatedItems.find((c) => c.menuItemId === item.id);
+        if (found) {
+          return { ...item, salesCount: item.salesCount + found.quantity };
+        }
+        return item;
+      })
+    );
+
+    // Prepend to orders
+    setOrders((prev) => [newOrder, ...prev]);
+
+    // Confetti burst
+    try {
+      confetti({
+        particleCount: 80,
+        spread: 70,
+        origin: { y: 0.6 },
+        colors: ['#e11d48', '#2563eb', '#10b981', '#f59e0b'],
+      });
+    } catch {}
+
+    // Show toast
+    showToast({
+      type: 'success',
+      title: `Order ${newOrder.orderNumber} Sent to Kitchen!`,
+      message: `${newOrder.tableNumber === 'Takeaway' ? 'Takeaway' : `Table ${newOrder.tableNumber}`} • ${validatedItems.length} items (${formatINR(grandTotal)}).`,
+    });
+
+    return newOrder;
+  };
+
   // POS Order Placement
   const placeOrder = (): Order | null => {
     if (cart.length === 0) {
@@ -514,29 +709,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return null;
     }
 
-    // Calculations
-    const subtotal = cart.reduce((sum, item) => sum + item.menuItem.price * item.quantity, 0);
-    let discount = 0;
-    if (cartMeta.discountType === 'percentage') {
-      discount = Math.round((subtotal * Math.max(0, Math.min(100, cartMeta.discountValue || 0))) / 100);
-    } else {
-      discount = Math.max(0, Math.min(cartMeta.discountValue || 0, subtotal));
-    }
+    const discountPercentage =
+      cartMeta.discountType === 'percentage' ? cartMeta.discountValue : undefined;
 
-    const discountedSubtotal = Math.max(0, subtotal - discount);
-    const gstRate = Math.max(0, brand.gstRate || 5);
-    const totalTax = (discountedSubtotal * gstRate) / 100;
-    const cgst = Math.round((totalTax / 2) * 100) / 100;
-    const sgst = Math.round((totalTax / 2) * 100) / 100;
-    const grandTotal = Math.round(discountedSubtotal + cgst + sgst);
-
-    const newOrder: Order = {
-      id: `ord-${Date.now()}`,
-      orderNumber: generateOrderNumber(orders.length),
-      customerName: cartMeta.customerName.trim() || 'Guest Customer',
-      customerPhone: cartMeta.customerPhone.trim() || '+91 99999 00000',
-      tableNumber: cartMeta.orderType === 'Dine-in' ? cartMeta.tableNumber : 'Takeaway',
+    const newOrder = createOrder({
+      tableNumber: cartMeta.tableNumber,
       orderType: cartMeta.orderType,
+      customerName: cartMeta.customerName,
+      customerPhone: cartMeta.customerPhone,
       items: cart.map((c) => ({
         menuItemId: c.menuItem.id,
         name: c.menuItem.name,
@@ -545,87 +725,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         foodType: c.menuItem.foodType || (c.menuItem.isVeg ? 'VEG' : 'NON_VEG'),
         notes: c.notes,
       })),
-      subtotal,
-      discount,
-      discountPercentage: cartMeta.discountType === 'percentage' ? cartMeta.discountValue : undefined,
-      gstRate,
-      cgst,
-      sgst,
-      grandTotal,
-      status: 'New',
-      createdAt: new Date().toISOString(),
+      notes: cartMeta.notes,
+      waiterName: cartMeta.waiterName || currentUser?.name || 'Staff',
       paymentMethod: cartMeta.paymentMethod,
       paymentStatus: 'Paid',
-      waiterName: cartMeta.waiterName || 'Staff',
-      notes: cartMeta.notes,
-    };
-
-    // Update table status if Dine-in
-    if (cartMeta.orderType === 'Dine-in' && cartMeta.tableNumber) {
-      setTables((prev) =>
-        prev.map((t) =>
-          t.tableNumber === cartMeta.tableNumber
-            ? {
-                ...t,
-                status: 'Occupied',
-                currentOrderId: newOrder.orderNumber,
-                currentBillAmount: grandTotal,
-                occupiedSince: 'Just now',
-              }
-            : t
-        )
-      );
-    }
-
-    // Update waiter stats
-    if (cartMeta.waiterName) {
-      setWaiters((prev) =>
-        prev.map((w) =>
-          w.name === cartMeta.waiterName
-            ? { ...w, totalOrders: w.totalOrders + 1, totalSales: w.totalSales + grandTotal }
-            : w
-        )
-      );
-    }
-
-    // Update item sales counts
-    setMenuItems((prev) =>
-      prev.map((item) => {
-        const found = cart.find((c) => c.menuItem.id === item.id);
-        if (found) {
-          return { ...item, salesCount: item.salesCount + found.quantity };
-        }
-        return item;
-      })
-    );
-
-    // Prepend to orders
-    setOrders((prev) => [newOrder, ...prev]);
-
-    // Clear cart and reset form notes
-    clearCart();
-    setCartMeta((prev) => ({ ...prev, notes: '' }));
-
-    // Confetti burst
-    try {
-      confetti({
-        particleCount: 80,
-        spread: 70,
-        origin: { y: 0.6 },
-        colors: ['#e11d48', '#2563eb', '#10b981', '#f59e0b'],
-      });
-    } catch {}
-
-    // Show toast
-    showToast({
-      type: 'success',
-      title: 'Order Placed & Bill Generated!',
-      message: `${newOrder.orderNumber} for ₹${grandTotal} successfully sent to Live Orders and Kitchen.`,
+      status: 'New',
+      discountPercentage,
     });
 
-    // Auto open invoice preview modal
-    setSelectedOrderForInvoice(newOrder);
-    setIsInvoiceModalOpen(true);
+    if (newOrder) {
+      clearCart();
+      setCartMeta((prev) => ({ ...prev, notes: '' }));
+      setSelectedOrderForInvoice(newOrder);
+      setIsInvoiceModalOpen(true);
+    }
 
     return newOrder;
   };
@@ -907,6 +1020,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         currentUser,
         isLoggedIn,
         login,
+        loginAsWaiter,
         logout,
         brand,
         updateBrand,
@@ -933,6 +1047,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         orders,
         updateOrderStatus,
         cancelOrder,
+        createOrder,
         cart,
         cartMeta,
         setCartMeta,
